@@ -679,8 +679,20 @@ def velocity_chart(df_all: pd.DataFrame) -> go.Figure:
 # ═══════════════════════════════════════════════════════════════════════════════
 #  LANDING PAGE  (no sidebar required — uploader is front and centre)
 # ═══════════════════════════════════════════════════════════════════════════════
+DEMO_SHEET_URL = "https://docs.google.com/spreadsheets/d/1ZPEX3hD0wOJSgPUiQO-Z6t27rjfR1J6U/edit?usp=sharing"
+
 if "uploaded_file" not in st.session_state:
     st.session_state.uploaded_file = None
+if "is_demo" not in st.session_state:
+    st.session_state.is_demo = False
+
+# Auto-load demo data on first visit
+if st.session_state.uploaded_file is None and not st.session_state.get("demo_tried"):
+    st.session_state.demo_tried = True
+    demo_data, err = fetch_gsheet(DEMO_SHEET_URL)
+    if demo_data:
+        st.session_state.uploaded_file = demo_data
+        st.session_state.is_demo = True
 
 
 if st.session_state.uploaded_file is None:
@@ -766,6 +778,7 @@ if st.session_state.uploaded_file is None:
         )
         if landing_file is not None:
             st.session_state.uploaded_file = landing_file
+            st.session_state.is_demo = False
             st.rerun()
 
     with col_div:
@@ -799,6 +812,7 @@ if st.session_state.uploaded_file is None:
                     st.error(err)
                 else:
                     st.session_state.uploaded_file = data
+                    st.session_state.is_demo = False
                     st.rerun()
             else:
                 st.warning("Please paste a Google Sheets URL first.")
@@ -939,6 +953,26 @@ with col_info:
 # ═══════════════════════════════════════════════════════════════════════════════
 #  TABS
 # ═══════════════════════════════════════════════════════════════════════════════
+# Demo data banner
+if st.session_state.get("is_demo"):
+    st.markdown(f"""
+    <div style="background:linear-gradient(90deg,#1e3a5f,#1e40af);border-radius:8px;
+                padding:10px 18px;margin-bottom:8px;display:flex;
+                align-items:center;justify-content:space-between">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:16px">&#127891;</span>
+        <div>
+          <span style="font-size:12px;font-weight:700;color:#f1f5f9">You're viewing demo data</span>
+          <span style="font-size:11px;color:#94a3b8;margin-left:10px">
+            Explore all features — click <b style="color:#60a5fa">&#9750; Home</b> in the header to load your own data
+          </span>
+        </div>
+      </div>
+      <span style="background:rgba(255,255,255,0.12);color:#f1f5f9;border-radius:20px;
+                   padding:2px 12px;font-size:11px;font-weight:600">Demo Mode</span>
+    </div>
+    """, unsafe_allow_html=True)
+
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📊  Overview", "📋  Tasks", "👥  Team", "📈  Insights",
     "🔍  Reports", "📅  Capacity", "🗓  Timeline", "📥  Backlog"
