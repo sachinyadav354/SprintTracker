@@ -176,6 +176,8 @@ div[data-testid="stHorizontalBlock"]:has(.hdr-anchor) button[kind="secondary"]:h
   box-shadow:0 1px 2px rgba(15,23,42,0.04);
 }}
 .row-item:last-child {{ margin-bottom:0; }}
+/* Ensure column groups don't bleed into next row */
+[data-testid="stHorizontalBlock"] {{ margin-bottom:4px !important; }}
 
 /* ══════════════════════════════════════════════
    SECTION HEADERS
@@ -297,6 +299,17 @@ def badge(text: str) -> str:
     return f'<span class="{cls}">{text}</span>'
 
 
+def severity_badge(priority: str) -> str:
+    """High / Medium / Low severity label derived from task priority."""
+    mapping = {"P0": ("#991b1b","#fee2e2","High"),
+               "P1": ("#92400e","#fef3c7","Medium"),
+               "P2": ("#1e40af","#dbeafe","Low"),
+               "P3": ("#374151","#f1f5f9","Low")}
+    tc, bg, lbl = mapping.get(priority, ("#374151","#f1f5f9","Low"))
+    return (f'<span style="background:{bg};color:{tc};border-radius:4px;'
+            f'padding:1px 7px;font-size:10px;font-weight:700">{lbl}</span>')
+
+
 def remarks_color(remark: str):
     """Returns (text_color, bg_color) — both are high-contrast for readability."""
     r = remark.lower()
@@ -319,10 +332,44 @@ def pbar(pct: float, color: str, height: int = 8) -> str:
 
 
 def pbar_color(pct: float) -> str:
-    """Pick a vivid bar colour based on completion percentage."""
-    if pct >= 80: return "#059669"   # emerald
-    if pct >= 40: return "#f59e0b"   # bright amber
-    return "#dc2626"                  # red
+    if pct >= 80: return "#059669"
+    if pct >= 40: return "#f59e0b"
+    return "#dc2626"
+
+
+_AVATAR_COLORS = ["#1d4ed8","#059669","#7c3aed","#dc2626","#0284c7",
+                  "#db2777","#d97706","#0d9488"]
+
+def avatar(name: str, size: int = 28) -> str:
+    initials = "".join(p[0].upper() for p in name.strip().split()[:2]) or "?"
+    color = _AVATAR_COLORS[hash(name) % len(_AVATAR_COLORS)]
+    return (f'<div style="width:{size}px;height:{size}px;border-radius:50%;'
+            f'background:{color};color:white;font-size:{size//2-1}px;'
+            f'font-weight:700;display:inline-flex;align-items:center;'
+            f'justify-content:center;flex-shrink:0">{initials}</div>')
+
+
+def time_ago(dt) -> str:
+    if pd.isna(dt):
+        return "—"
+    diff = pd.Timestamp.now() - pd.Timestamp(dt)
+    mins = int(diff.total_seconds() / 60)
+    if mins < 1:   return "just now"
+    if mins < 60:  return f"{mins}m ago"
+    if mins < 1440: return f"{mins//60}h ago"
+    return f"{mins//1440}d ago"
+
+
+def status_badge_ref(status: str) -> str:
+    """Colored badge matching reference-style status labels."""
+    s = status.lower()
+    if s in ("done","completed"):
+        return f'<span style="background:#dcfce7;color:#166534;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700">Completed</span>'
+    if s in ("dev","in progress","uat"):
+        return f'<span style="background:#dbeafe;color:#1e40af;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700">In Progress</span>'
+    if s == "blocked":
+        return f'<span style="background:#fee2e2;color:#991b1b;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700">Blocked</span>'
+    return f'<span style="background:#f1f5f9;color:#475569;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700">To Do</span>'
 
 
 def fetch_gsheet(url: str):
@@ -341,14 +388,16 @@ def fetch_gsheet(url: str):
         return None, str(e)
 
 
-def load_data(file) -> pd.DataFrame:
+def load_data(file) -> tuple:
+    """Returns (sprint_df, daily_df). daily_df is None if sheet not present."""
     if isinstance(file, (bytes, bytearray)):
         file = BytesIO(file)
-    df = pd.read_excel(file, engine="openpyxl")
+    xls = pd.ExcelFile(file, engine="openpyxl")
+    df = xls.parse("Sprint Data") if "Sprint Data" in xls.sheet_names else xls.parse(0)
     df = df.dropna(axis=1, how="all")
     df.columns = df.columns.str.strip()
     for col in ["Percentage Complete","Total Estimated Hours",
-                "Estimated Effort this sprint","Actual Effort"]:
+                "Estimated Effort this sprint","Actual Effort","Story Points"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     if {"Estimated Effort this sprint","Actual Effort"} <= set(df.columns):
@@ -356,10 +405,24 @@ def load_data(file) -> pd.DataFrame:
             df["Estimated Effort this sprint"] - df["Actual Effort"]
         ).clip(lower=0)
     for col in ["Blocker","Starred","Status","Priority","Team","Resource",
-                "Remarks","Summary","Jira ID","From","Sprint"]:
+                "Remarks","Summary","Jira ID","From","Sprint","Sprint Goal",
+                "Last Updated By"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
-    return df
+    if "Last Updated" in df.columns:
+        df["Last Updated"] = pd.to_datetime(df["Last Updated"], errors="coerce")
+    if "Story Points" not in df.columns:
+        df["Story Points"] = 0
+    daily_df = None
+    if "Daily Log" in xls.sheet_names:
+        daily_df = xls.parse("Daily Log")
+        daily_df.columns = daily_df.columns.str.strip()
+        daily_df["Date"] = pd.to_datetime(daily_df["Date"], errors="coerce")
+        for c in ["Ideal SP Remaining","Actual SP Remaining",
+                  "Planned Effort (h)","Actual Effort Logged (h)"]:
+            if c in daily_df.columns:
+                daily_df[c] = pd.to_numeric(daily_df[c], errors="coerce").fillna(0)
+    return df, daily_df
 
 
 # ── Chart factories ────────────────────────────────────────────────────────────
@@ -405,21 +468,27 @@ def gauge_chart(value: float) -> go.Figure:
     return fig
 
 
-def donut_chart(labels, values, title, colors=None) -> go.Figure:
+def donut_chart(labels, values, title, colors=None, center_text=None) -> go.Figure:
     colors = colors or [STATUS_COLORS.get(l, TEXT_LIGHT) for l in labels]
+    total  = sum(values)
     fig = go.Figure(go.Pie(
-        labels=labels, values=values, hole=0.58,
+        labels=labels, values=values, hole=0.60,
         marker=dict(colors=colors, line=dict(color=CARD, width=2)),
         textinfo="percent", textfont={"size": 11, "color": TEXT_DARK},
         insidetextorientation="horizontal",
-        hovertemplate="<b>%{label}</b><br>%{value} tasks (%{percent})<extra></extra>",
+        hovertemplate="<b>%{label}</b><br>%{value} (%{percent})<extra></extra>",
     ))
+    center = center_text or f"<b>{total}</b>"
+    fig.add_annotation(
+        text=center, x=0.5, y=0.5, showarrow=False,
+        font=dict(size=15, color=TEXT_DARK, family="Inter, Arial"),
+        xanchor="center", yanchor="middle",
+    )
     fig.update_layout(
-        **_base_layout(title, 200, margin=dict(l=6, r=6, t=36, b=28)),
+        **_base_layout(title, 210, margin=dict(l=6, r=6, t=36, b=28)),
         legend=dict(
-            orientation="h", x=0.5, y=-0.08, xanchor="center",
+            orientation="h", x=0.5, y=-0.06, xanchor="center",
             font={"size": 11, "color": TEXT_MID}, bgcolor="rgba(0,0,0,0)",
-            itemwidth=40,
         ),
         showlegend=True,
     )
@@ -514,6 +583,95 @@ def variance_chart(df: pd.DataFrame) -> go.Figure:
                "tickfont": {"size": 11, "color": TEXT_MID}},
         yaxis={"gridcolor": "rgba(0,0,0,0)",
                "tickfont": {"size": 12, "color": GREEN, "family": "Inter, Arial"}},
+    )
+    return fig
+
+
+def burndown_chart(daily_df: pd.DataFrame, sprint: str) -> go.Figure:
+    d = daily_df[daily_df["Sprint"] == sprint].sort_values("Day")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=d["Day"], y=d["Ideal SP Remaining"], name="Ideal",
+        line=dict(color="#94a3b8", width=2, dash="dash"),
+        hovertemplate="Day %{x} — Ideal: %{y} SP<extra></extra>"))
+    fig.add_trace(go.Scatter(
+        x=d["Day"], y=d["Actual SP Remaining"], name="Actual",
+        line=dict(color=BLUE, width=2.5),
+        fill="tozeroy", fillcolor="rgba(29,78,216,0.06)",
+        hovertemplate="Day %{x} — Actual: %{y} SP<extra></extra>"))
+    fig.update_layout(
+        **_base_layout("Burndown Chart", 220),
+        xaxis={"title": "Sprint Day", "gridcolor": GRID_COLOR,
+               "tickfont": {"size": 11, "color": TEXT_MID}},
+        yaxis={"title": "SP Remaining", "gridcolor": GRID_COLOR,
+               "tickfont": {"size": 11, "color": TEXT_MID}},
+        legend=dict(orientation="h", y=1.12, font={"size": 11}, bgcolor="rgba(0,0,0,0)"),
+    )
+    return fig
+
+
+def effort_trend_chart(daily_df: pd.DataFrame, sprint: str) -> go.Figure:
+    d = daily_df[daily_df["Sprint"] == sprint].sort_values("Day")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=d["Day"], y=d["Planned Effort (h)"], name="Planned",
+        line=dict(color="#94a3b8", width=2, dash="dot"),
+        hovertemplate="Day %{x} — Planned: %{y}h<extra></extra>"))
+    fig.add_trace(go.Scatter(
+        x=d["Day"], y=d["Actual Effort Logged (h)"], name="Actual Logged",
+        line=dict(color=GREEN, width=2.5),
+        fill="tozeroy", fillcolor="rgba(5,150,105,0.07)",
+        hovertemplate="Day %{x} — Actual: %{y}h<extra></extra>"))
+    fig.update_layout(
+        **_base_layout("Effort Trend (Cumulative)", 220),
+        xaxis={"title": "Sprint Day", "gridcolor": GRID_COLOR,
+               "tickfont": {"size": 11, "color": TEXT_MID}},
+        yaxis={"title": "Hours", "gridcolor": GRID_COLOR,
+               "tickfont": {"size": 11, "color": TEXT_MID}},
+        legend=dict(orientation="h", y=1.12, font={"size": 11}, bgcolor="rgba(0,0,0,0)"),
+    )
+    return fig
+
+
+def velocity_chart(df_all: pd.DataFrame) -> go.Figure:
+    vel = (df_all.groupby("Sprint")
+           .agg(SP_Done=("Story Points", lambda x:
+               x[df_all.loc[x.index,"Status"].str.lower()=="done"].sum()),
+                SP_Total=("Story Points","sum"))
+           .reset_index())
+    vel["Sprint_Short"] = vel["Sprint"].str.extract(r'(Sprint \d+)')
+    avg = vel["SP_Done"].mean()
+
+    # Delta vs previous sprint
+    delta_text = ""
+    if len(vel) >= 2:
+        curr = vel["SP_Done"].iloc[-1]
+        prev = vel["SP_Done"].iloc[-2]
+        if prev > 0:
+            delta_pct = (curr - prev) / prev * 100
+            arrow = "▲" if delta_pct >= 0 else "▼"
+            delta_color = GREEN if delta_pct >= 0 else RED
+            delta_text = f"  <span style='color:{delta_color}'>{arrow} {abs(delta_pct):.0f}% vs last sprint</span>"
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=vel["Sprint_Short"], y=vel["SP_Total"], name="Committed",
+        marker_color="#e0e7ff", text=vel["SP_Total"],
+        textposition="outside", textfont={"size": 11, "color": TEXT_MID}))
+    fig.add_trace(go.Bar(
+        x=vel["Sprint_Short"], y=vel["SP_Done"], name="Delivered",
+        marker_color=BLUE, text=vel["SP_Done"],
+        textposition="inside", textfont={"size": 11, "color": "white"}))
+    fig.add_hline(y=avg, line_dash="dash", line_color=AMBER, line_width=1.5,
+                  annotation_text=f"Avg {avg:.0f} SP", annotation_font_color=AMBER)
+    fig.update_layout(
+        **_base_layout(f"Team Velocity{delta_text}", 220),
+        barmode="overlay",
+        xaxis={"gridcolor": GRID_COLOR, "tickfont": {"size": 12, "color": GREEN}},
+        yaxis={"gridcolor": GRID_COLOR, "title": "Story Points",
+               "tickfont": {"size": 11, "color": TEXT_MID}},
+        legend=dict(orientation="h", y=1.12, font={"size": 11}, bgcolor="rgba(0,0,0,0)"),
+        bargap=0.35,
     )
     return fig
 
@@ -673,7 +831,7 @@ uploaded = st.session_state.uploaded_file
 # ═══════════════════════════════════════════════════════════════════════════════
 #  LOAD DATA + UNIFIED DARK HEADER (filter controls + sprint info in one row)
 # ═══════════════════════════════════════════════════════════════════════════════
-df_all   = load_data(uploaded)
+df_all, daily_df = load_data(uploaded)
 sprints  = [s for s in df_all["Sprint"].dropna().unique() if s]
 teams_all = sorted(df_all["Team"].unique().tolist())
 today    = pd.Timestamp.now().normalize()
@@ -681,7 +839,7 @@ today    = pd.Timestamp.now().normalize()
 import streamlit.components.v1 as _components
 
 # Create the unified header row — 5 columns
-col_info, col_sprint, col_teams, col_browse, col_print = st.columns([2.6, 1.1, 2.2, 0.7, 0.65])
+col_info, col_sprint, col_teams, col_browse, col_print, col_user = st.columns([2.4, 1.1, 2.0, 0.7, 0.65, 0.9])
 
 # ── Fill filter controls first (needed before data filtering) ──
 with col_sprint:
@@ -703,6 +861,20 @@ with col_print:
           🖨 Print</button>''',
         height=38,
     )
+
+# Feature 10 — User Profile widget in header
+with col_user:
+    st.markdown(f"""
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="width:32px;height:32px;border-radius:8px;background:{BLUE};
+                  color:white;font-size:11px;font-weight:800;display:flex;
+                  align-items:center;justify-content:center;flex-shrink:0;
+                  letter-spacing:-0.02em">ZX</div>
+      <div style="min-width:0">
+        <div style="font-size:12px;font-weight:700;color:#f1f5f9;white-space:nowrap">Zorvix</div>
+        <div style="font-size:10px;color:#64748b;white-space:nowrap">Sprint Intelligence</div>
+      </div>
+    </div>""", unsafe_allow_html=True)
 
 # ── Filter & KPIs ──
 df = df_all.copy()
@@ -767,51 +939,223 @@ with col_info:
 # ═══════════════════════════════════════════════════════════════════════════════
 #  TABS
 # ═══════════════════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4 = st.tabs(["📊  Overview", "📋  Tasks", "👥  Team", "📈  Insights"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "📊  Overview", "📋  Tasks", "👥  Team", "📈  Insights",
+    "🔍  Reports", "📅  Capacity", "🗓  Timeline", "📥  Backlog"
+])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 — OVERVIEW
 # ─────────────────────────────────────────────────────────────────────────────
 with tab1:
+    # ── Row 1: SP progress + Sprint Goal + Blockers ───────────────────────────
+    sp_total     = int(df["Story Points"].sum()) if "Story Points" in df.columns else 0
+    sp_done      = int(df.loc[df["Status"].str.lower()=="done","Story Points"].sum()) if sp_total else 0
+    sp_remaining = sp_total - sp_done
+    sp_pct       = int(sp_done/sp_total*100) if sp_total else 0
+    sprint_goal  = df["Sprint Goal"].iloc[0] if "Sprint Goal" in df.columns and df["Sprint Goal"].iloc[0] else ""
 
+    # ── Feature 5: Sprint Health Score ───────────────────────────────────────
+    # Weighted score: completion rate (40%) + no blockers (25%) + P0/P1 progress (25%) + effort (10%)
+    blocker_score  = max(0, 100 - blocked_n * 20)
+    p0p1 = df[df["Priority"].isin(["P0","P1"])]["Percentage Complete"]
+    p0p1_score     = float(p0p1.mean()) if len(p0p1) else 100
+    effort_score   = min(100, (total_actual / max(total_est,1)) * 100)
+    health_score   = int(avg_pct * 0.40 + blocker_score * 0.25 + p0p1_score * 0.25 + effort_score * 0.10)
+    if health_score >= 75:   health_label, health_color, health_bg = "Healthy",  "#059669", "#dcfce7"
+    elif health_score >= 50: health_label, health_color, health_bg = "At Risk",  "#d97706", "#fef3c7"
+    else:                    health_label, health_color, health_bg = "Critical", "#dc2626", "#fee2e2"
+
+    # ── Row 1: 3 equal cards — SP / Health / Goal (fixed height, no overflow) ──
+    CARD_H = "140px"
+    sg1, sg2, sg3 = st.columns(3)
+
+    with sg1:
+        st.markdown(f"""
+        <div class="card" style="border-top:3px solid {BLUE};min-height:{CARD_H}">
+          <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;
+                      letter-spacing:0.08em;margin-bottom:10px">Story Points</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;text-align:center">
+            <div style="background:#f8fafc;border-radius:8px;padding:8px 4px">
+              <div style="font-size:22px;font-weight:800;color:{TEXT_DARK}">{sp_total}</div>
+              <div style="font-size:10px;color:#94a3b8;text-transform:uppercase">Committed</div>
+            </div>
+            <div style="background:#f0fdf4;border-radius:8px;padding:8px 4px">
+              <div style="font-size:22px;font-weight:800;color:{GREEN}">{sp_done}</div>
+              <div style="font-size:10px;color:#94a3b8;text-transform:uppercase">Done</div>
+            </div>
+            <div style="background:#fffbeb;border-radius:8px;padding:8px 4px">
+              <div style="font-size:22px;font-weight:800;color:{AMBER}">{sp_remaining}</div>
+              <div style="font-size:10px;color:#94a3b8;text-transform:uppercase">Remaining</div>
+            </div>
+          </div>
+          {pbar(sp_pct, BLUE, 6)}
+          <div style="font-size:10px;color:#64748b;margin-top:5px;text-align:right">{sp_pct}% complete</div>
+        </div>""", unsafe_allow_html=True)
+
+    with sg2:
+        st.markdown(f"""
+        <div class="card" style="border-top:3px solid {health_color};min-height:{CARD_H};text-align:center">
+          <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;
+                      letter-spacing:0.08em;margin-bottom:8px">Sprint Health</div>
+          <div style="font-size:40px;font-weight:800;color:{health_color};line-height:1">{health_score}</div>
+          <div style="font-size:10px;color:#94a3b8;margin-bottom:8px">out of 100</div>
+          <div style="background:{health_bg};color:{health_color};border-radius:20px;
+                      padding:3px 12px;font-size:11px;font-weight:700;display:inline-block">
+            {health_label}
+          </div>
+          {pbar(health_score, health_color, 6)}
+        </div>""", unsafe_allow_html=True)
+
+    with sg3:
+        goal_html = (sprint_goal if sprint_goal
+                     else "<span style='color:#94a3b8;font-size:12px'>Add a <b>Sprint Goal</b> column to your Excel.</span>")
+        prog_html = (pbar(avg_pct, GREEN, 6) +
+                     f'<div style="font-size:11px;color:#64748b;margin-top:6px">{avg_pct:.0f}% complete</div>'
+                     if sprint_goal else "")
+        st.markdown(f"""
+        <div class="card" style="border-top:3px solid {GREEN};min-height:{CARD_H}">
+          <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;
+                      letter-spacing:0.08em;margin-bottom:8px">&#127919; Sprint Goal</div>
+          <div style="font-size:13px;color:{TEXT_DARK};line-height:1.6">{goal_html}</div>
+          {prog_html}
+        </div>""", unsafe_allow_html=True)
+
+    # ── Row 2: Top Blockers (2 per row, compact) ──────────────────────────────
+    blk = df[df["Blocker"].str.lower() == "yes"]
+    if not blk.empty:
+        st.markdown(f'<div class="section-hdr">&#x1F6A7; Top Blockers</div>', unsafe_allow_html=True)
+        blk_top = blk.head(4)
+        blk_cols = st.columns(2)
+        for i, (_, r) in enumerate(blk_top.iterrows()):
+            fc = PRIORITY_COLORS.get(r["Priority"], TEXT_LIGHT)
+            try:
+                days_blocked = max(int((today - pd.to_datetime(r.get("Start date", today))).days), 0)
+                since_html = (f'<span style="background:#fee2e2;color:#991b1b;border-radius:4px;'
+                              f'padding:1px 6px;font-size:10px;font-weight:700">since {days_blocked}d</span>')
+            except Exception:
+                since_html = ""
+            with blk_cols[i % 2]:
+                st.markdown(
+                    f'<div class="row-item" style="border-left:4px solid {fc}">'
+                    f'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px">'
+                    f'<div style="display:flex;align-items:center;gap:5px">'
+                    f'<b style="color:{TEXT_DARK};font-size:12px">{r["Jira ID"]}</b>'
+                    f'{badge(r["Priority"])}</div>'
+                    f'<div style="display:flex;align-items:center;gap:4px">'
+                    f'{severity_badge(r["Priority"])} {since_html}</div></div>'
+                    f'<div style="font-size:11px;color:{TEXT_MID};margin:2px 0">'
+                    f'{str(r.get("Summary",""))[:55] or "—"}</div>'
+                    f'<div style="font-size:10px;color:#64748b">&#128100; {r["Resource"]}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True)
+        st.markdown('<div style="margin-bottom:8px"></div>', unsafe_allow_html=True)
+
+    # ── Row 3: Burndown + Effort Trend (if Daily Log exists) ──────────────────
+    if daily_df is not None and sprint_label in daily_df["Sprint"].values:
+        bd_col, et_col = st.columns(2)
+        with bd_col:
+            st.plotly_chart(burndown_chart(daily_df, sprint_label),
+                            use_container_width=True, config={"displayModeBar": False})
+        with et_col:
+            st.plotly_chart(effort_trend_chart(daily_df, sprint_label),
+                            use_container_width=True, config={"displayModeBar": False})
+
+    # ── Row 3: Status donut | Priority donut | Velocity ───────────────────────
     c1, c2, c3 = st.columns(3)
     with c1:
         sc = df["Status"].value_counts()
         st.plotly_chart(
             donut_chart(sc.index.tolist(), sc.values.tolist(), "Tasks by Status",
-                        [STATUS_COLORS.get(s, TEXT_LIGHT) for s in sc.index]),
+                        [STATUS_COLORS.get(s, TEXT_LIGHT) for s in sc.index],
+                        center_text=f"<b>{sc.sum()}</b><br><span style='font-size:10px'>Tasks</span>"),
             use_container_width=True, config={"displayModeBar": False})
-
     with c2:
         pc = df["Priority"].replace("","—").value_counts().sort_index()
         st.plotly_chart(
             donut_chart(pc.index.tolist(), pc.values.tolist(), "Tasks by Priority",
-                        [PRIORITY_COLORS.get(p, TEXT_LIGHT) for p in pc.index]),
+                        [PRIORITY_COLORS.get(p, TEXT_LIGHT) for p in pc.index],
+                        center_text=f"<b>{pc.sum()}</b><br><span style='font-size:10px'>Tasks</span>"),
             use_container_width=True, config={"displayModeBar": False})
-
     with c3:
-        st.markdown(f'<p style="font-size:13px;font-weight:700;color:{TEXT_DARK};margin-bottom:8px">🚧 Top Blockers</p>',
-                    unsafe_allow_html=True)
-        blk = df[df["Blocker"].str.lower() == "yes"]
-        if blk.empty:
-            st.success("No blockers!")
+        if "Story Points" in df_all.columns and df_all["Sprint"].nunique() >= 1:
+            st.plotly_chart(velocity_chart(df_all),
+                            use_container_width=True, config={"displayModeBar": False})
         else:
-            for _, r in blk.iterrows():
-                fc = PRIORITY_COLORS.get(r["Priority"], TEXT_LIGHT)
-                st.markdown(f"""
-                <div class="row-item" style="border-left:4px solid {fc}">
-                  <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
-                    <b style="color:{TEXT_DARK};font-size:13px">{r['Jira ID']}</b>
-                    {badge(r['Priority'])} {badge(r['Status'])}
-                  </div>
-                  <div style="font-size:12px;color:{TEXT_MID}">{str(r.get('Summary',''))[:55] or '—'}</div>
-                  <div style="font-size:11px;color:{TEXT_LIGHT};margin-top:3px">👤 {r['Resource']}</div>
-                </div>""", unsafe_allow_html=True)
+            tc = df.groupby("Team")["Percentage Complete"].mean().reset_index()
+            st.plotly_chart(team_bar(tc["Team"].tolist(), tc["Percentage Complete"].tolist()),
+                            use_container_width=True, config={"displayModeBar": False})
 
+    # ── Row 4: Team completion bar ────────────────────────────────────────────
     tc = df.groupby("Team")["Percentage Complete"].mean().reset_index()
     st.plotly_chart(team_bar(tc["Team"].tolist(), tc["Percentage Complete"].tolist()),
                     use_container_width=True, config={"displayModeBar": False})
+
+    # ── Row 5: Top Stories | Tracker Update ──────────────────────────────────
+    ts_col, tu_col = st.columns([3, 2])
+
+    with ts_col:
+        st.markdown(f'<div class="section-hdr">Top Stories</div>', unsafe_allow_html=True)
+        top = (df[df["Priority"].isin(["P0","P1"])]
+               .sort_values(["Priority","Percentage Complete"], ascending=[True,False])
+               .head(6))
+        # Header
+        st.markdown(f"""
+        <div style="display:grid;grid-template-columns:80px 1fr 110px 60px 32px;
+                    gap:8px;padding:4px 12px;font-size:10px;font-weight:700;
+                    color:#94a3b8;text-transform:uppercase;letter-spacing:0.07em;
+                    border-bottom:1px solid {BORDER};margin-bottom:4px">
+          <div>ID</div><div>Title</div><div>Status</div>
+          <div style="text-align:center">SP</div><div></div>
+        </div>""", unsafe_allow_html=True)
+        for _, r in top.iterrows():
+            sp = int(r.get("Story Points", 0))
+            st.markdown(f"""
+            <div style="display:grid;grid-template-columns:80px 1fr 110px 60px 32px;
+                        gap:8px;align-items:center;padding:7px 12px;
+                        border-bottom:1px solid {BORDER}">
+              <div style="font-size:12px;font-weight:600;color:{BLUE}">{r['Jira ID']}</div>
+              <div style="font-size:12px;color:{TEXT_DARK};white-space:nowrap;
+                          overflow:hidden;text-overflow:ellipsis" title="{r.get('Summary','')}">
+                {str(r.get('Summary',''))[:38] or r['Jira ID']}
+              </div>
+              <div>{status_badge_ref(r['Status'])}</div>
+              <div style="text-align:center;font-size:12px;font-weight:700;
+                          color:{TEXT_DARK}">{sp} <span style="font-size:10px;
+                          color:#94a3b8">SP</span></div>
+              <div style="display:flex;justify-content:center">
+                {avatar(r['Resource'], 26)}
+              </div>
+            </div>""", unsafe_allow_html=True)
+        st.markdown(f'<div style="padding:8px 12px"><a style="font-size:12px;color:{BLUE};text-decoration:none;font-weight:600">View all stories →</a></div>', unsafe_allow_html=True)
+
+    with tu_col:
+        st.markdown(f'<div class="section-hdr">Tracker Update</div>', unsafe_allow_html=True)
+        if "Last Updated By" in df.columns and "Last Updated" in df.columns:
+            recent = (df[df["Last Updated"].notna()]
+                      .sort_values("Last Updated", ascending=False)
+                      .drop_duplicates("Last Updated By")
+                      .head(6))
+            for _, r in recent.iterrows():
+                st.markdown(f"""
+                <div style="display:flex;align-items:center;gap:10px;
+                            padding:8px 4px;border-bottom:1px solid {BORDER}">
+                  {avatar(r['Last Updated By'], 32)}
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:12px;font-weight:600;color:{TEXT_DARK}">
+                      {r['Last Updated By']}
+                    </div>
+                    <div style="font-size:11px;color:#64748b">
+                      updated tracker · {r['Jira ID']}
+                    </div>
+                  </div>
+                  <div style="font-size:11px;color:#94a3b8;white-space:nowrap">
+                    {time_ago(r['Last Updated'])}
+                  </div>
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.info("Add **Last Updated By** and **Last Updated** columns to your Excel to see activity here.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -909,24 +1253,36 @@ with tab3:
     w_col, o_col = st.columns([1, 1])
 
     with w_col:
-        st.markdown(f'<div class="section-hdr">Workload Utilisation</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="section-hdr">Team Workload</div>', unsafe_allow_html=True)
         wdf = (df.groupby("Resource")
                  .agg(Act=("Actual Effort","sum"), Est=("Estimated Effort this sprint","sum"))
                  .reset_index())
         wdf["util"] = ((wdf["Act"] / wdf["Est"].replace(0,1)) * 100).clip(upper=100).round(0)
+        # Header row
+        st.markdown(f"""
+        <div style="display:grid;grid-template-columns:36px 1fr 110px 52px;
+                    gap:8px;padding:4px 8px;font-size:10px;font-weight:700;
+                    color:#94a3b8;text-transform:uppercase;letter-spacing:0.07em;
+                    border-bottom:1px solid {BORDER};margin-bottom:4px">
+          <div></div><div>Member</div>
+          <div>Logged / Cap</div><div style="text-align:right">Util</div>
+        </div>""", unsafe_allow_html=True)
         for _, r in wdf.iterrows():
-            u = int(r["util"])
+            u  = int(r["util"])
             bc = "#059669" if u <= 70 else "#f59e0b" if u <= 90 else "#dc2626"
             st.markdown(f"""
-            <div class="row-item">
-              <div style="display:flex;justify-content:space-between;align-items:center">
-                <b style="color:{TEXT_DARK};font-size:13px">{r['Resource']}</b>
-                <span style="font-size:12px;color:{TEXT_MID}">
-                  {r['Act']:.0f}h / {r['Est']:.0f}h &nbsp;
-                  <b style="color:{bc}">{u}%</b>
-                </span>
+            <div style="display:grid;grid-template-columns:36px 1fr 110px 52px;
+                        gap:8px;align-items:center;padding:6px 8px;
+                        border-bottom:1px solid {BORDER}">
+              {avatar(r['Resource'], 30)}
+              <div style="font-size:13px;font-weight:600;color:{TEXT_DARK}">{r['Resource']}</div>
+              <div>
+                <div style="font-size:11px;color:#64748b;margin-bottom:3px">
+                  {r['Act']:.0f}h / {r['Est']:.0f}h
+                </div>
+                {pbar(u, bc, 6)}
               </div>
-              {pbar(u, bc)}
+              <div style="text-align:right;font-size:13px;font-weight:700;color:{bc}">{u}%</div>
             </div>""", unsafe_allow_html=True)
 
     with o_col:
@@ -1076,3 +1432,439 @@ with tab4:
                 </div>""", unsafe_allow_html=True)
     else:
         st.info("Add a 'Remarks' column to your Excel to see this heatmap.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 5 — REPORTS (new data-driven insights)
+# ─────────────────────────────────────────────────────────────────────────────
+with tab5:
+
+    # ── 1. Priority Inversion Alert ───────────────────────────────────────────
+    st.markdown('<div class="section-hdr">Priority Completion Health</div>', unsafe_allow_html=True)
+    st.markdown('<p class="sub">Are high-priority tasks completing faster than low-priority? Inversion = red flag.</p>', unsafe_allow_html=True)
+
+    pri_health = (df.groupby("Priority")
+                  .agg(Avg_Pct=("Percentage Complete","mean"),
+                       SP=("Story Points","sum"),
+                       Tasks=("Jira ID","count"),
+                       Blockers=("Blocker", lambda x: (x=="Yes").sum()))
+                  .reset_index()
+                  .sort_values("Priority"))
+
+    p_cols = st.columns(len(pri_health))
+    for col, (_, r) in zip(p_cols, pri_health.iterrows()):
+        pct       = int(r["Avg_Pct"])
+        bc        = pbar_color(pct)
+        warn      = " &#x1F6A8;" if r["Priority"] in ("P0","P1") and pct < 60 else ""
+        blk_count = int(r["Blockers"])
+        blk_html  = (f'<div style="font-size:10px;color:#dc2626;margin-top:4px;font-weight:600">'
+                     f'&#9888; {blk_count} blocker(s)</div>') if blk_count > 0 else ""
+        bar_html  = pbar(pct, bc, 6)
+        border_c  = PRIORITY_COLORS.get(r["Priority"], BLUE)
+        html = (f'<div class="card" style="border-top:3px solid {border_c};text-align:center">'
+                f'<div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px">'
+                f'{r["Priority"]}{warn}</div>'
+                f'<div style="font-size:28px;font-weight:800;color:{bc}">{pct}%</div>'
+                f'<div style="font-size:10px;color:#94a3b8;margin:4px 0">'
+                f'{int(r["Tasks"])} tasks &middot; {int(r["SP"])} SP</div>'
+                f'{bar_html}{blk_html}</div>')
+        with col:
+            st.markdown(html, unsafe_allow_html=True)
+
+    p0_avg = float(pri_health.loc[pri_health["Priority"]=="P0","Avg_Pct"].values[0]) if "P0" in pri_health["Priority"].values else 100
+    p3_avg = float(pri_health.loc[pri_health["Priority"]=="P3","Avg_Pct"].values[0]) if "P3" in pri_health["Priority"].values else 0
+    if p0_avg < p3_avg - 20:
+        st.error(f"🚨 **Priority Inversion detected** — P0 tasks at {p0_avg:.0f}% while P3 tasks at {p3_avg:.0f}%. Critical items are being left behind.")
+
+    # ── 2. SP Delivery by Team + Resource Efficiency ──────────────────────────
+    r1, r2 = st.columns(2)
+
+    with r1:
+        st.markdown('<div class="section-hdr">Story Points Delivery by Team</div>', unsafe_allow_html=True)
+        team_sp = df.groupby("Team").agg(
+            Committed=("Story Points","sum"),
+            Delivered=("Story Points", lambda x: x[df.loc[x.index,"Status"]=="Done"].sum())
+        ).reset_index()
+        fig_sp = go.Figure()
+        fig_sp.add_trace(go.Bar(x=team_sp["Team"], y=team_sp["Committed"], name="Committed",
+                                marker_color="#e0e7ff", text=team_sp["Committed"],
+                                textposition="outside", textfont={"size":11,"color":TEXT_MID}))
+        fig_sp.add_trace(go.Bar(x=team_sp["Team"], y=team_sp["Delivered"], name="Delivered",
+                                marker_color=BLUE, text=team_sp["Delivered"],
+                                textposition="inside", textfont={"size":11,"color":"white"}))
+        fig_sp.update_layout(**_base_layout("SP Committed vs Delivered", 220),
+                             barmode="overlay", bargap=0.35,
+                             xaxis={"tickfont":{"size":12,"color":GREEN}},
+                             yaxis={"gridcolor":GRID_COLOR,"tickfont":{"size":11,"color":TEXT_MID}},
+                             legend=dict(orientation="h",y=1.12,font={"size":11},bgcolor="rgba(0,0,0,0)"))
+        st.plotly_chart(fig_sp, use_container_width=True, config={"displayModeBar":False})
+
+    with r2:
+        st.markdown('<div class="section-hdr">Resource Efficiency Score</div>', unsafe_allow_html=True)
+        st.markdown('<p class="sub">Actual hours logged vs estimated — over 100% = over budget</p>', unsafe_allow_html=True)
+        eff_df = df.groupby("Resource").agg(
+            Est=("Estimated Effort this sprint","sum"),
+            Act=("Actual Effort","sum"),
+            Done=("Status", lambda x: (x=="Done").sum()),
+            SP=("Story Points", lambda x: x[df.loc[x.index,"Status"]=="Done"].sum())
+        ).reset_index()
+        eff_df["Eff"] = (eff_df["Act"] / eff_df["Est"].replace(0,1) * 100).round(0).astype(int)
+        # Header
+        st.markdown(f"""
+        <div style="display:grid;grid-template-columns:36px 1fr 80px 60px 50px;
+                    gap:8px;padding:4px 8px;font-size:10px;font-weight:700;color:#94a3b8;
+                    text-transform:uppercase;letter-spacing:0.07em;border-bottom:1px solid {BORDER};margin-bottom:4px">
+          <div></div><div>Member</div><div>Act/Est</div><div>SP Done</div><div style="text-align:right">Eff%</div>
+        </div>""", unsafe_allow_html=True)
+        for _, r in eff_df.sort_values("Eff").iterrows():
+            bc = "#059669" if r["Eff"] <= 80 else "#f59e0b" if r["Eff"] <= 100 else "#dc2626"
+            st.markdown(f"""
+            <div style="display:grid;grid-template-columns:36px 1fr 80px 60px 50px;
+                        gap:8px;align-items:center;padding:7px 8px;border-bottom:1px solid {BORDER}">
+              {avatar(r['Resource'], 28)}
+              <div style="font-size:12px;font-weight:600;color:{TEXT_DARK}">{r['Resource']}</div>
+              <div style="font-size:11px;color:#64748b">{r['Act']:.0f}h / {r['Est']:.0f}h</div>
+              <div style="font-size:12px;font-weight:700;color:{BLUE};text-align:center">{int(r['SP'])} SP</div>
+              <div style="text-align:right;font-size:13px;font-weight:700;color:{bc}">{r['Eff']}%</div>
+            </div>""", unsafe_allow_html=True)
+
+    # ── 3. Category Health + Sprint Comparison ────────────────────────────────
+    r3, r4 = st.columns(2)
+
+    with r3:
+        st.markdown('<div class="section-hdr">Category Health Scorecard</div>', unsafe_allow_html=True)
+        cat = df.groupby("From").agg(
+            Tasks=("Jira ID","count"),
+            SP=("Story Points","sum"),
+            Avg_Pct=("Percentage Complete","mean"),
+            Blockers=("Blocker", lambda x: (x=="Yes").sum()),
+            Act=("Actual Effort","sum")
+        ).reset_index().sort_values("Avg_Pct", ascending=False)
+        for _, r in cat.iterrows():
+            pct        = int(r["Avg_Pct"])
+            bc         = pbar_color(pct)
+            blk_count  = int(r["Blockers"])
+            blk_html   = (f'<span style="font-size:10px;color:#dc2626;font-weight:700">'
+                          f'&#9888; {blk_count} blocked</span>') if blk_count > 0 else ""
+            bar_html   = pbar(pct, bc, 7)
+            html = (f'<div class="row-item">'
+                    f'<div style="display:flex;justify-content:space-between;'
+                    f'align-items:center;margin-bottom:5px">'
+                    f'<div><span style="font-size:13px;font-weight:700;color:{TEXT_DARK}">'
+                    f'{r["From"]}</span>'
+                    f'<span style="font-size:11px;color:#94a3b8;margin-left:8px">'
+                    f'{int(r["Tasks"])} tasks &middot; {int(r["SP"])} SP &middot; {r["Act"]:.0f}h'
+                    f'</span></div>'
+                    f'<div style="display:flex;align-items:center;gap:8px">'
+                    f'{blk_html}'
+                    f'<span style="font-size:14px;font-weight:800;color:{bc}">{pct}%</span>'
+                    f'</div></div>'
+                    f'{bar_html}</div>')
+            st.markdown(html, unsafe_allow_html=True)
+
+    with r4:
+        st.markdown('<div class="section-hdr">Sprint Comparison</div>', unsafe_allow_html=True)
+        scomp = df_all.groupby("Sprint").agg(
+            Tasks=("Jira ID","count"),
+            SP=("Story Points","sum"),
+            Done=("Status", lambda x: (x=="Done").sum()),
+            Blocked=("Blocker", lambda x: (x=="Yes").sum()),
+            Avg_Pct=("Percentage Complete","mean"),
+            Est=("Estimated Effort this sprint","sum"),
+            Act=("Actual Effort","sum")
+        ).reset_index()
+        # Header
+        st.markdown(f"""
+        <div style="display:grid;grid-template-columns:1fr 40px 40px 40px 50px 50px;
+                    gap:6px;padding:5px 10px;font-size:10px;font-weight:700;color:#94a3b8;
+                    text-transform:uppercase;border-bottom:1px solid {BORDER};margin-bottom:4px">
+          <div>Sprint</div><div>Tasks</div><div>SP</div>
+          <div>Done</div><div>Velocity</div><div>Progress</div>
+        </div>""", unsafe_allow_html=True)
+        for i, (_, r) in enumerate(scomp.iterrows()):
+            pct = int(r["Avg_Pct"])
+            bc  = pbar_color(pct)
+            sp_name = str(r["Sprint"])[:14] + "…" if len(str(r["Sprint"])) > 14 else str(r["Sprint"])
+            bg = "#f8fafc" if i % 2 == 0 else CARD
+            st.markdown(f"""
+            <div style="display:grid;grid-template-columns:1fr 40px 40px 40px 50px 50px;
+                        gap:6px;align-items:center;padding:8px 10px;background:{bg};
+                        border-bottom:1px solid {BORDER}">
+              <div style="font-size:11px;font-weight:600;color:{TEXT_DARK}">{sp_name}</div>
+              <div style="font-size:12px;color:#64748b;text-align:center">{int(r['Tasks'])}</div>
+              <div style="font-size:12px;color:#64748b;text-align:center">{int(r['SP'])}</div>
+              <div style="font-size:12px;font-weight:700;color:{GREEN};text-align:center">{int(r['Done'])}</div>
+              <div style="font-size:12px;font-weight:700;color:{BLUE};text-align:center">{r['Act']:.0f}h</div>
+              <div style="font-size:13px;font-weight:700;color:{bc};text-align:right">{pct}%</div>
+            </div>""", unsafe_allow_html=True)
+
+    # ── 4. Daily Risk Radar ───────────────────────────────────────────────────
+    st.markdown('<div class="section-hdr" style="margin-top:16px">Daily Risk Radar — Hours/Day Needed to Finish</div>', unsafe_allow_html=True)
+    st.markdown('<p class="sub">Tasks requiring the most hours per remaining day to hit release date on time</p>', unsafe_allow_html=True)
+
+    risk = df[df["Percentage Complete"] < 100].copy()
+    risk["days_left"] = (pd.to_datetime(risk["Release Date"]) - today).dt.days.clip(lower=1)
+    risk["h_per_day"] = (risk["Remaining effort"] / risk["days_left"]).round(1)
+    risk = risk[risk["Remaining effort"] > 0].sort_values("h_per_day", ascending=False).head(8)
+
+    r_c1, r_c2 = st.columns(2)
+    for i, (_, r) in enumerate(risk.iterrows()):
+        col = r_c1 if i % 2 == 0 else r_c2
+        fc  = PRIORITY_COLORS.get(r["Priority"], TEXT_LIGHT)
+        danger = r["h_per_day"] >= 4
+        with col:
+            st.markdown(f"""
+            <div class="row-item" style="border-left:4px solid {'#dc2626' if danger else '#f59e0b'}">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <div style="display:flex;align-items:center;gap:6px">
+                  <b style="color:{TEXT_DARK};font-size:13px">{r['Jira ID']}</b>
+                  {badge(r['Priority'])} {badge(r['Status'])}
+                </div>
+                <span style="font-size:14px;font-weight:800;color:{'#dc2626' if danger else '#f59e0b'}">
+                  {r['h_per_day']}h/day
+                </span>
+              </div>
+              <div style="font-size:11px;color:#64748b;margin:3px 0">
+                {str(r.get('Summary',''))[:55] or '—'}
+              </div>
+              <div style="font-size:11px;color:#94a3b8">
+                👤 {r['Resource']} &nbsp;·&nbsp; 🕐 {r['Remaining effort']:.0f}h left &nbsp;·&nbsp; 📅 {int(r['days_left'])}d to release
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 6 — CAPACITY PLAN
+# ─────────────────────────────────────────────────────────────────────────────
+with tab6:
+    SPRINT_CAPACITY_H = 40  # hours per person per sprint
+
+    cap_df = df.groupby("Resource").agg(
+        Allocated=("Estimated Effort this sprint", "sum"),
+        Actual=("Actual Effort", "sum"),
+        Tasks=("Jira ID", "count"),
+        Done=("Status", lambda x: (x == "Done").sum()),
+    ).reset_index()
+    cap_df["Capacity"]  = SPRINT_CAPACITY_H
+    cap_df["Available"] = (cap_df["Capacity"] - cap_df["Allocated"]).clip(lower=0)
+    cap_df["Util_pct"]  = (cap_df["Allocated"] / cap_df["Capacity"] * 100).clip(upper=120).round(0).astype(int)
+
+    # Summary row
+    total_cap   = len(cap_df) * SPRINT_CAPACITY_H
+    total_alloc = int(cap_df["Allocated"].sum())
+    total_avail = max(total_cap - total_alloc, 0)
+    alloc_pct   = int(total_alloc / total_cap * 100)
+
+    s1, s2, s3, s4 = st.columns(4)
+    for col, lbl, val, color in [
+        (s1, "Team Capacity",  f"{total_cap}h",   BLUE),
+        (s2, "Allocated",      f"{total_alloc}h",  AMBER),
+        (s3, "Available",      f"{total_avail}h",  GREEN),
+        (s4, "Utilisation",    f"{alloc_pct}%",    RED if alloc_pct > 90 else GREEN),
+    ]:
+        with col:
+            st.markdown(f"""
+            <div class="card" style="text-align:center;border-top:3px solid {color}">
+              <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;
+                          letter-spacing:0.07em;margin-bottom:6px">{lbl}</div>
+              <div style="font-size:28px;font-weight:800;color:{color}">{val}</div>
+            </div>""", unsafe_allow_html=True)
+
+    st.markdown('<div class="section-hdr" style="margin-top:14px">Per-Person Capacity</div>', unsafe_allow_html=True)
+    # Table header
+    st.markdown(f"""
+    <div style="display:grid;grid-template-columns:44px 1fr 80px 80px 80px 80px 100px 60px;
+                gap:8px;padding:5px 10px;font-size:10px;font-weight:700;color:#94a3b8;
+                text-transform:uppercase;letter-spacing:0.07em;border-bottom:1px solid #e2e8f0">
+      <div></div><div>Member</div><div>Capacity</div><div>Allocated</div>
+      <div>Actual</div><div>Available</div><div>Utilisation</div><div>Tasks</div>
+    </div>""", unsafe_allow_html=True)
+
+    for _, r in cap_df.sort_values("Util_pct", ascending=False).iterrows():
+        bc = "#059669" if r["Util_pct"] <= 80 else "#f59e0b" if r["Util_pct"] <= 100 else "#dc2626"
+        over = " &#9888;" if r["Util_pct"] > 100 else ""
+        st.markdown(
+            f'<div style="display:grid;grid-template-columns:44px 1fr 80px 80px 80px 80px 100px 60px;'
+            f'gap:8px;align-items:center;padding:8px 10px;border-bottom:1px solid #e2e8f0">'
+            f'{avatar(r["Resource"], 32)}'
+            f'<div style="font-size:13px;font-weight:600;color:#0f172a">{r["Resource"]}</div>'
+            f'<div style="font-size:12px;color:#64748b">{int(r["Capacity"])}h</div>'
+            f'<div style="font-size:12px;color:#64748b">{int(r["Allocated"])}h</div>'
+            f'<div style="font-size:12px;color:#64748b">{int(r["Actual"])}h</div>'
+            f'<div style="font-size:12px;font-weight:600;color:{GREEN}">{int(r["Available"])}h</div>'
+            f'<div>{pbar(min(r["Util_pct"],100), bc, 8)}'
+            f'<div style="font-size:10px;color:{bc};margin-top:2px">{r["Util_pct"]}%{over}</div></div>'
+            f'<div style="font-size:12px;color:#64748b;text-align:center">'
+            f'{int(r["Done"])}/{int(r["Tasks"])}</div>'
+            f'</div>',
+            unsafe_allow_html=True)
+
+    # Allocation chart
+    st.markdown('<div class="section-hdr" style="margin-top:14px">Capacity Allocation Chart</div>', unsafe_allow_html=True)
+    fig_cap = go.Figure()
+    fig_cap.add_trace(go.Bar(x=cap_df["Resource"], y=cap_df["Capacity"],
+                             name="Capacity", marker_color="#e0e7ff",
+                             text=cap_df["Capacity"], textposition="outside",
+                             textfont={"size": 11, "color": TEXT_MID}))
+    fig_cap.add_trace(go.Bar(x=cap_df["Resource"], y=cap_df["Allocated"],
+                             name="Allocated", marker_color=BLUE,
+                             text=cap_df["Allocated"], textposition="inside",
+                             textfont={"size": 11, "color": "white"}))
+    fig_cap.add_trace(go.Bar(x=cap_df["Resource"], y=cap_df["Actual"],
+                             name="Actual", marker_color=GREEN,
+                             text=cap_df["Actual"], textposition="inside",
+                             textfont={"size": 11, "color": "white"}))
+    fig_cap.update_layout(**_base_layout("Hours: Capacity vs Allocated vs Actual", 240),
+                          barmode="group", bargap=0.25, bargroupgap=0.06,
+                          xaxis={"tickfont": {"size": 12, "color": GREEN}},
+                          yaxis={"gridcolor": GRID_COLOR, "tickfont": {"size": 11, "color": TEXT_MID}},
+                          legend=dict(orientation="h", y=1.12, font={"size": 11}, bgcolor="rgba(0,0,0,0)"))
+    st.plotly_chart(fig_cap, use_container_width=True, config={"displayModeBar": False})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 7 — TIMELINE (Gantt)
+# ─────────────────────────────────────────────────────────────────────────────
+with tab7:
+    st.markdown('<div class="section-hdr">Sprint Timeline</div>', unsafe_allow_html=True)
+    st.markdown('<p class="sub">Each bar shows a task from Start date to Release date, coloured by status</p>', unsafe_allow_html=True)
+
+    tdf = df.copy()
+    tdf["Start date"]   = pd.to_datetime(tdf["Start date"],   errors="coerce")
+    tdf["Release Date"] = pd.to_datetime(tdf["Release Date"], errors="coerce")
+    tdf = tdf.dropna(subset=["Start date", "Release Date"])
+    tdf = tdf.sort_values(["Start date","Priority"])
+    tdf["Label"] = tdf["Jira ID"] + " · " + tdf["Summary"].str[:28]
+    tdf["Detail"] = (tdf["Resource"] + " · " + tdf["Status"] +
+                     " · " + tdf["Percentage Complete"].astype(int).astype(str) + "%")
+
+    # Use px.timeline — designed specifically for Gantt charts
+    fig_gantt = px.timeline(
+        tdf,
+        x_start="Start date",
+        x_end="Release Date",
+        y="Label",
+        color="Status",
+        color_discrete_map=STATUS_COLORS,
+        hover_name="Jira ID",
+        hover_data={"Label": False, "Start date": True, "Release Date": True,
+                    "Resource": True, "Percentage Complete": True,
+                    "Priority": True, "Status": True},
+        text="Detail",
+    )
+
+    fig_gantt.update_traces(
+        textposition="inside",
+        textfont=dict(size=10, color="white"),
+        marker_line=dict(color=CARD, width=1),
+        insidetextanchor="middle",
+    )
+
+    # Today line — use add_shape (add_vline breaks with px.timeline date axis)
+    today_str = str(today.date())
+    fig_gantt.add_shape(
+        type="line",
+        x0=today_str, x1=today_str, y0=0, y1=1, yref="paper",
+        line=dict(color=RED, width=2, dash="dash"),
+    )
+    fig_gantt.add_annotation(
+        x=today_str, y=1.03, yref="paper",
+        text="<b>Today</b>", showarrow=False,
+        font=dict(color=RED, size=11, family="Inter, Arial"),
+        xanchor="left",
+    )
+
+    fig_gantt.update_layout(
+        height=max(320, len(tdf) * 30 + 80),
+        margin=dict(l=6, r=16, t=40, b=8),
+        paper_bgcolor=CARD, plot_bgcolor=CARD,
+        font=CHART_FONT,
+        xaxis=dict(
+            title="", gridcolor=GRID_COLOR,
+            tickfont={"size": 11, "color": TEXT_MID},
+            tickformat="%d %b",
+        ),
+        yaxis=dict(
+            gridcolor="rgba(0,0,0,0)",
+            tickfont={"size": 11, "color": TEXT_DARK},
+            autorange="reversed",
+        ),
+        legend=dict(
+            orientation="h", y=1.06, x=0,
+            font={"size": 11, "color": TEXT_MID},
+            bgcolor="rgba(0,0,0,0)",
+            title_text="",
+        ),
+        showlegend=True,
+    )
+    st.plotly_chart(fig_gantt, use_container_width=True, config={"displayModeBar": False})
+
+    # Summary row below chart
+    col_s = st.columns(len(STATUS_COLORS))
+    for col, (status, color) in zip(col_s, STATUS_COLORS.items()):
+        count = (tdf["Status"] == status).sum()
+        with col:
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:6px;padding:4px 8px;'
+                f'background:#f8fafc;border-radius:6px;border:1px solid {BORDER}">'
+                f'<div style="width:10px;height:10px;border-radius:3px;background:{color};flex-shrink:0"></div>'
+                f'<span style="font-size:11px;font-weight:600;color:{TEXT_DARK}">{status}</span>'
+                f'<span style="font-size:11px;color:#94a3b8;margin-left:auto">{count}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 8 — BACKLOG
+# ─────────────────────────────────────────────────────────────────────────────
+with tab8:
+    # Backlog = incomplete tasks from previous sprints (not current sprint)
+    backlog = df_all[
+        (df_all["Sprint"] != sprint_label) &
+        (df_all["Percentage Complete"].astype(float) < 100) &
+        (df_all["Status"].str.lower() != "done")
+    ].copy()
+
+    st.markdown(f"""
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div>
+        <div style="font-size:16px;font-weight:700;color:{TEXT_DARK}">Backlog</div>
+        <div style="font-size:12px;color:#64748b">Incomplete tasks from previous sprints</div>
+      </div>
+      <div style="background:#fee2e2;color:#991b1b;border-radius:20px;
+                  padding:4px 14px;font-size:13px;font-weight:700">{len(backlog)} items</div>
+    </div>""", unsafe_allow_html=True)
+
+    if backlog.empty:
+        st.success("No backlog items — all previous sprint tasks are completed!")
+    else:
+        # Group by sprint
+        for sprint_name, grp in backlog.groupby("Sprint"):
+            sp_label_short = sprint_name[:30] + "…" if len(sprint_name) > 30 else sprint_name
+            st.markdown(f'<div class="section-hdr">{sp_label_short} — {len(grp)} items</div>',
+                        unsafe_allow_html=True)
+            for _, r in grp.sort_values("Priority").iterrows():
+                pct = int(r["Percentage Complete"])
+                fc  = PRIORITY_COLORS.get(r["Priority"], TEXT_LIGHT)
+                bc  = pbar_color(pct)
+                sp  = int(r.get("Story Points", 0))
+                st.markdown(
+                    f'<div class="row-item" style="border-left:4px solid {fc}">'
+                    f'<div style="display:flex;align-items:center;justify-content:space-between">'
+                    f'<div style="display:flex;align-items:center;gap:6px">'
+                    f'<b style="color:{TEXT_DARK};font-size:13px">{r["Jira ID"]}</b>'
+                    f'{badge(r["Priority"])} {badge(r["Status"])}'
+                    f'</div>'
+                    f'<div style="display:flex;align-items:center;gap:8px">'
+                    f'{severity_badge(r["Priority"])}'
+                    f'<span style="font-size:12px;font-weight:700;color:#94a3b8">{sp} SP</span>'
+                    f'<span style="font-size:13px;font-weight:700;color:{bc}">{pct}%</span>'
+                    f'</div></div>'
+                    f'<div style="font-size:12px;color:{TEXT_MID};margin:3px 0">'
+                    f'{str(r.get("Summary",""))[:65] or "—"}</div>'
+                    f'<div style="display:flex;align-items:center;justify-content:space-between;margin-top:2px">'
+                    f'<div style="font-size:10px;color:#64748b">&#128100; {r["Resource"]} &nbsp;&#128197; {r.get("Release Date","")}</div>'
+                    f'{pbar(pct, bc, 4)}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True)
