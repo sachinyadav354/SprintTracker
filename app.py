@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import re
+import requests
+from io import BytesIO
 
 st.set_page_config(
     page_title="DMI Sprint Dashboard",
@@ -322,7 +325,25 @@ def pbar_color(pct: float) -> str:
     return "#dc2626"                  # red
 
 
+def fetch_gsheet(url: str):
+    """Download a publicly-shared Google Sheet as xlsx bytes. Returns bytes or None."""
+    match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
+    if not match:
+        return None, "Could not find a Sheet ID in that URL."
+    sheet_id = match.group(1)
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+    try:
+        r = requests.get(export_url, timeout=15)
+        if r.status_code == 200:
+            return r.content, None
+        return None, f"Google returned status {r.status_code}. Make sure the sheet is shared as **Anyone with link → Viewer**."
+    except Exception as e:
+        return None, str(e)
+
+
 def load_data(file) -> pd.DataFrame:
+    if isinstance(file, (bytes, bytearray)):
+        file = BytesIO(file)
     df = pd.read_excel(file, engine="openpyxl")
     df = df.dropna(axis=1, how="all")
     df.columns = df.columns.str.strip()
@@ -570,24 +591,59 @@ if st.session_state.uploaded_file is None:
 
     st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-    # ── Upload CTA ────────────────────────────────────────────────────────────
-    st.markdown(f"""
-    <div style="background:{CARD};border:2px dashed #cbd5e1;border-radius:12px;
-                padding:28px 32px;text-align:center;margin-bottom:16px">
-      <div style="font-size:28px;margin-bottom:8px">📂</div>
-      <div style="font-size:16px;font-weight:700;color:{TEXT_DARK};margin-bottom:4px">Upload your MSME Tracker</div>
-      <div style="font-size:13px;color:#64748b;margin-bottom:16px">Accepts .xlsx or .xls · Max 200 MB</div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ── Two-option data source panel ──────────────────────────────────────────
+    col_up, col_div, col_gs = st.columns([1, 0.04, 1])
 
-    _, mid, _ = st.columns([1, 2, 1])
-    with mid:
+    with col_up:
+        st.markdown(f"""
+        <div style="background:{CARD};border:1px solid {BORDER};border-radius:12px;
+                    padding:24px 24px 16px;height:100%">
+          <div style="font-size:20px;margin-bottom:6px">📂</div>
+          <div style="font-size:14px;font-weight:700;color:{TEXT_DARK};margin-bottom:4px">Upload Excel File</div>
+          <div style="font-size:12px;color:#64748b;margin-bottom:14px">Accepts .xlsx or .xls · Max 200 MB</div>
+        </div>
+        """, unsafe_allow_html=True)
         landing_file = st.file_uploader(
-            "Choose Excel file", type=["xlsx","xls"], label_visibility="collapsed"
+            "Choose file", type=["xlsx","xls"], label_visibility="collapsed"
         )
         if landing_file is not None:
             st.session_state.uploaded_file = landing_file
             st.rerun()
+
+    with col_div:
+        st.markdown(f"""
+        <div style="display:flex;flex-direction:column;align-items:center;
+                    justify-content:center;height:180px;gap:6px">
+          <div style="flex:1;width:1px;background:{BORDER}"></div>
+          <div style="font-size:11px;font-weight:600;color:#94a3b8;padding:4px 0">OR</div>
+          <div style="flex:1;width:1px;background:{BORDER}"></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_gs:
+        st.markdown(f"""
+        <div style="background:{CARD};border:1px solid {BORDER};border-radius:12px;
+                    padding:24px 24px 16px;height:100%">
+          <div style="font-size:20px;margin-bottom:6px">🔗</div>
+          <div style="font-size:14px;font-weight:700;color:{TEXT_DARK};margin-bottom:4px">Connect Google Sheet</div>
+          <div style="font-size:12px;color:#64748b;margin-bottom:14px">Share sheet as <b>Anyone with link → Viewer</b> first</div>
+        </div>
+        """, unsafe_allow_html=True)
+        gs_url = st.text_input(
+            "Google Sheets URL", placeholder="https://docs.google.com/spreadsheets/d/...",
+            label_visibility="collapsed"
+        )
+        if st.button("Connect Sheet", use_container_width=True, type="primary"):
+            if gs_url.strip():
+                with st.spinner("Fetching sheet…"):
+                    data, err = fetch_gsheet(gs_url.strip())
+                if err:
+                    st.error(err)
+                else:
+                    st.session_state.uploaded_file = data
+                    st.rerun()
+            else:
+                st.warning("Please paste a Google Sheets URL first.")
 
     st.markdown(f"""
     <div style="text-align:center;padding:24px 0 8px">
